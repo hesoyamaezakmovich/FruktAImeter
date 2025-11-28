@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/">
+        <file>FruktAImeter.qml</file>
+        <file>cover/DefaultCoverPage.qml</file>
+        <file>pages/AboutPage.qml</file>
+        <file>pages/MainPage.qml</file>
+    </qresource>
+</RCC>

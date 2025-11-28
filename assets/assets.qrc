@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/models">
+        <file>yolo11n.param</file>
+        <file>yolo11n.bin</file>
+    </qresource>
+    <qresource prefix="/data">
+        <file>dataset.csv</file>
+        <file>labels.csv</file>
+    </qresource>
+    <qresource prefix="/images">
+        <file>test_apple_good.jpg</file>
+        <file>test_apple_bad.jpg</file>
+    </qresource>
+</RCC>

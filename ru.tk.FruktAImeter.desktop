@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Name=FruktAImeter
+Icon=ru.tk.FruktAImeter
+Exec=/usr/bin/ru.tk.FruktAImeter
+Categories=Application;
