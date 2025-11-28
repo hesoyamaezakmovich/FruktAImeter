@@ -6,7 +6,7 @@
 #include <QStandardPaths>
 
 static const int TARGET_SIZE = 640;
-static const float CONF_THRESHOLD = 0.45f;
+static const float CONF_THRESHOLD = 0.25f;
 static const float NMS_THRESHOLD = 0.5f;
 
 // --- Helpers for NMS ---
@@ -39,41 +39,58 @@ static void nms_sorted_bboxes(const std::vector<Object>& faceobjects, std::vecto
 }
 
 Detector::Detector(QObject *parent) : QObject(parent) {
-    // Копируем модель из ресурсов во временную папку (NCNN не читает из qrc)
     QString paramPath = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/yolo11n.param";
     QString binPath = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/yolo11n.bin";
 
+    qDebug() << "Detector: Copying model to" << paramPath;
+
     if (QFile::exists(":/models/yolo11n.param")) {
         QFile::remove(paramPath); QFile::remove(binPath);
-        QFile::copy(":/models/yolo11n.param", paramPath);
-        QFile::copy(":/models/yolo11n.bin", binPath);
+        bool p1 = QFile::copy(":/models/yolo11n.param", paramPath);
+        bool p2 = QFile::copy(":/models/yolo11n.bin", binPath);
         QFile::setPermissions(paramPath, QFile::ReadOwner | QFile::WriteOwner);
         QFile::setPermissions(binPath, QFile::ReadOwner | QFile::WriteOwner);
+        qDebug() << "Detector: Copy result param:" << p1 << "bin:" << p2;
+    } else {
+        qDebug() << "Detector: ERROR - model not found in resources!";
     }
 
-    if (m_net.load_param(paramPath.toStdString().c_str()) == 0 &&
-        m_net.load_model(binPath.toStdString().c_str()) == 0) {
-        qDebug() << "Detector: NCNN loaded!";
+    int ret1 = m_net.load_param(paramPath.toStdString().c_str());
+    int ret2 = m_net.load_model(binPath.toStdString().c_str());
+    
+    if (ret1 == 0 && ret2 == 0) {
+        qDebug() << "Detector: NCNN loaded successfully!";
     } else {
-        qDebug() << "Detector: ERROR loading NCNN! Check assets.";
+        qDebug() << "Detector: ERROR loading NCNN! param:" << ret1 << "bin:" << ret2;
     }
 }
 
 Detector::~Detector() { m_net.clear(); }
 
 void Detector::analyzeFromPath(const QString &imagePath) {
-    QImage img(imagePath);
+    QString path = imagePath;
+    if (path.startsWith("file://")) {
+        path = path.mid(7);
+    }
+    
+    qDebug() << "Detector: Loading image from" << path;
+    
+    QImage img(path);
     if (img.isNull()) {
+        qDebug() << "Detector: Failed to load image!";
         emit analysisError("Не удалось загрузить изображение");
         return;
     }
+    
+    qDebug() << "Detector: Image loaded, size:" << img.width() << "x" << img.height();
     analyze(img);
 }
 
 void Detector::analyzeTestImage(int imageType) {
     QString resourcePath = (imageType == 0) ? ":/images/test_apple_good.jpg" : ":/images/test_apple_bad.jpg";
 
-    // Копируем из ресурсов во временную папку
+    qDebug() << "Detector: Loading test image" << imageType << "from" << resourcePath;
+
     QString tmpPath = QStandardPaths::writableLocation(QStandardPaths::TempLocation) +
                       QString("/test_apple_%1.jpg").arg(imageType);
 
@@ -82,12 +99,13 @@ void Detector::analyzeTestImage(int imageType) {
         QFile::setPermissions(tmpPath, QFile::ReadOwner | QFile::WriteOwner);
         QImage img(tmpPath);
         if (!img.isNull()) {
-            qDebug() << "Detector: Loaded test image" << imageType << "size:" << img.width() << "x" << img.height();
+            qDebug() << "Detector: Test image loaded, size:" << img.width() << "x" << img.height();
             analyze(img);
         } else {
             emit analysisError("Не удалось загрузить тестовое изображение");
         }
     } else {
+        qDebug() << "Detector: Resource not found:" << resourcePath;
         emit analysisError("Тестовое изображение не найдено в ресурсах");
     }
 }
@@ -96,6 +114,7 @@ void Detector::analyze(const QImage &img) {
     QtConcurrent::run([=]() {
         cv::Mat cvImg = AppleUtils::QImageToCvMat(img);
         if (cvImg.empty()) {
+            qDebug() << "Detector: Failed to convert QImage to cv::Mat";
             QMetaObject::invokeMethod(const_cast<Detector*>(this), "analysisError",
                 Qt::QueuedConnection, Q_ARG(QString, "Не удалось конвертировать изображение"));
             return;
@@ -103,121 +122,217 @@ void Detector::analyze(const QImage &img) {
 
         int img_w = cvImg.cols;
         int img_h = cvImg.rows;
+        qDebug() << "Detector: Processing image" << img_w << "x" << img_h;
 
         // 1. Preprocess
         ncnn::Mat in = ncnn::Mat::from_pixels_resize(cvImg.data, ncnn::Mat::PIXEL_BGR2RGB, img_w, img_h, TARGET_SIZE, TARGET_SIZE);
         const float norm_vals[3] = {1/255.f, 1/255.f, 1/255.f};
         in.substract_mean_normalize(0, norm_vals);
 
+        qDebug() << "Detector: Input prepared, running inference...";
+
         ncnn::Extractor ex = m_net.create_extractor();
-        ex.input("images", in);
+        ex.set_light_mode(true);
+        
+        // Используем точные имена из .param файла
+        int input_ret = ex.input("in0", in);
+        if (input_ret != 0) {
+            qDebug() << "Detector: ERROR setting input 'in0', ret:" << input_ret;
+            goto fallback_classify;
+        }
+        qDebug() << "Detector: Input 'in0' set successfully";
 
-        ncnn::Mat out0, out1;
-        ex.extract("output0", out0); // Detection
-        ex.extract("output1", out1); // Mask Protos
+        {
+            ncnn::Mat out0;
+            int extract_ret = ex.extract("out0", out0);
+            if (extract_ret != 0) {
+                qDebug() << "Detector: ERROR extracting 'out0', ret:" << extract_ret;
+                goto fallback_classify;
+            }
 
-        // 2. Parse YOLOv8/11 Output
-        std::vector<Object> proposals;
-        const int num_grid = out0.w;
-        const int num_mask_proto = 32;
+            qDebug() << "Detector: Output 'out0' shape - w:" << out0.w << "h:" << out0.h << "c:" << out0.c << "dims:" << out0.dims;
 
-        qDebug() << "Detector: Parsing YOLO output, grid size:" << num_grid;
+            // Анализируем формат выхода
+            // YOLOv8/11 выход обычно: [num_features, 8400] где num_features = 4 + num_classes (+ 32 для seg)
+            // Или может быть транспонирован: [8400, num_features]
+            
+            std::vector<Object> proposals;
+            int num_proposals = 0;
+            int num_features = 0;
+            bool transposed = false;
+            
+            // Определяем ориентацию данных
+            if (out0.w == 8400) {
+                // Формат: [features, 8400] - стандартный YOLOv8
+                num_proposals = out0.w;
+                num_features = out0.h;
+                transposed = false;
+            } else if (out0.h == 8400) {
+                // Формат: [8400, features] - транспонированный
+                num_proposals = out0.h;
+                num_features = out0.w;
+                transposed = true;
+            } else {
+                // Попробуем как есть
+                num_proposals = out0.w;
+                num_features = out0.h;
+                qDebug() << "Detector: Unknown output format, trying w as proposals";
+            }
+            
+            int num_classes = num_features - 4;  // 4 = x,y,w,h
+            if (num_classes > 32) {
+                // Вероятно есть mask coefficients, уберём их
+                num_classes = num_classes - 32;
+            }
+            if (num_classes < 1) num_classes = 1;
+            
+            qDebug() << "Detector: Parsing - proposals:" << num_proposals 
+                     << "features:" << num_features 
+                     << "classes:" << num_classes
+                     << "transposed:" << transposed;
 
-        for (int i = 0; i < num_grid; i++) {
-            // output0 shape [dim, 8400]. 4=score
-            float score = out0.row(4)[i];
-            if (score > CONF_THRESHOLD) {
-                Object obj;
-                obj.label = 0;
-                obj.prob = score;
+            float max_score_found = 0;
+            int detections_above_threshold = 0;
+            
+            for (int i = 0; i < num_proposals; i++) {
+                float x, y, w, h;
+                float max_class_score = 0;
+                int max_class_idx = 0;
+                
+                if (transposed) {
+                    // [8400, features] - строки это proposals
+                    const float* row = out0.row(i);
+                    x = row[0];
+                    y = row[1];
+                    w = row[2];
+                    h = row[3];
+                    for (int c = 0; c < num_classes; c++) {
+                        float score = row[4 + c];
+                        if (score > max_class_score) {
+                            max_class_score = score;
+                            max_class_idx = c;
+                        }
+                    }
+                } else {
+                    // [features, 8400] - колонки это proposals
+                    x = out0.row(0)[i];
+                    y = out0.row(1)[i];
+                    w = out0.row(2)[i];
+                    h = out0.row(3)[i];
+                    for (int c = 0; c < num_classes; c++) {
+                        float score = out0.row(4 + c)[i];
+                        if (score > max_class_score) {
+                            max_class_score = score;
+                            max_class_idx = c;
+                        }
+                    }
+                }
+                
+                if (max_class_score > max_score_found) {
+                    max_score_found = max_class_score;
+                }
+                
+                if (max_class_score > CONF_THRESHOLD) {
+                    detections_above_threshold++;
+                    
+                    Object obj;
+                    obj.label = max_class_idx;
+                    obj.prob = max_class_score;
 
-                float x = out0.row(0)[i];
-                float y = out0.row(1)[i];
-                float w = out0.row(2)[i];
-                float h = out0.row(3)[i];
+                    float x0 = x - w * 0.5f;
+                    float y0 = y - h * 0.5f;
 
-                float x0 = x - w * 0.5f;
-                float y0 = y - h * 0.5f;
+                    float scale_x = (float)img_w / TARGET_SIZE;
+                    float scale_y = (float)img_h / TARGET_SIZE;
 
-                float scale_x = (float)img_w / TARGET_SIZE;
-                float scale_y = (float)img_h / TARGET_SIZE;
+                    obj.rect.x = x0 * scale_x;
+                    obj.rect.y = y0 * scale_y;
+                    obj.rect.width = w * scale_x;
+                    obj.rect.height = h * scale_y;
 
-                obj.rect.x = x0 * scale_x;
-                obj.rect.y = y0 * scale_y;
-                obj.rect.width = w * scale_x;
-                obj.rect.height = h * scale_y;
+                    proposals.push_back(obj);
+                    
+                    if (detections_above_threshold <= 5) {
+                        qDebug() << "Detector: Detection" << detections_above_threshold
+                                 << "class:" << max_class_idx 
+                                 << "score:" << max_class_score
+                                 << "bbox:" << obj.rect.x << obj.rect.y << obj.rect.width << obj.rect.height;
+                    }
+                }
+            }
 
-                obj.mask_feat.resize(num_mask_proto);
-                for (int k = 0; k < num_mask_proto; k++) obj.mask_feat[k] = out0.row(5 + k)[i];
+            qDebug() << "Detector: Max score found:" << max_score_found 
+                     << "detections above threshold:" << detections_above_threshold;
 
-                proposals.push_back(obj);
+            // NMS
+            qsort_descent_inplace(proposals);
+            std::vector<int> picked;
+            nms_sorted_bboxes(proposals, picked, NMS_THRESHOLD);
+
+            qDebug() << "Detector: After NMS:" << picked.size() << "objects";
+
+            if (!picked.empty()) {
+                Object& best = proposals[picked[0]];
+                
+                qDebug() << "Detector: Best detection - class" << best.label << "prob" << best.prob;
+
+                cv::Rect roi;
+                roi.x = std::max(0, (int)best.rect.x);
+                roi.y = std::max(0, (int)best.rect.y);
+                roi.width = std::min(img_w - roi.x, (int)best.rect.width);
+                roi.height = std::min(img_h - roi.y, (int)best.rect.height);
+
+                if (roi.width > 10 && roi.height > 10) {
+                    cv::Mat appleCrop = cvImg(roi);
+                    arma::rowvec features = AppleUtils::extractFeatures(appleCrop);
+                    int result = m_brain.classify(features);
+
+                    const_cast<Detector*>(this)->m_lastFeatures = features;
+
+                    QString quality = (result == 1) ? "Хорошее 🍏" : "Плохое 🍎";
+                    qDebug() << "Detector: Classification result:" << quality;
+                    
+                    QMetaObject::invokeMethod(const_cast<Detector*>(this), "analysisComplete",
+                        Qt::QueuedConnection,
+                        Q_ARG(QString, quality),
+                        Q_ARG(float, best.prob));
+                    return;
+                }
             }
         }
 
-        // 3. NMS
-        qsort_descent_inplace(proposals);
-        std::vector<int> picked;
-        nms_sorted_bboxes(proposals, picked, NMS_THRESHOLD);
-
-        qDebug() << "Detector: Found" << proposals.size() << "proposals," << picked.size() << "after NMS";
-
-        if (!picked.empty()) {
-            Object& best = proposals[picked[0]];
-
-            // 4. Decode Mask
-            decode_mask(out1, img_w, img_h, ncnn::Mat(32, (void*)best.mask_feat.data()), best.mask);
-
-            // 5. Remove Background (Black BG)
-            cv::Mat mask_bin;
-            if (best.mask.size() != cvImg.size()) cv::resize(best.mask, best.mask, cvImg.size());
-
-            best.mask.convertTo(mask_bin, CV_8U, 255.0);
-            cv::threshold(mask_bin, mask_bin, 127, 255, cv::THRESH_BINARY);
-
-            cv::Mat maskedImg;
-            cv::bitwise_and(cvImg, cvImg, maskedImg, mask_bin);
-
-            // 6. Crop & Classify
-            cv::Rect roi = best.rect;
-            roi.x = std::max(0, roi.x); roi.y = std::max(0, roi.y);
-            roi.width = std::min(img_w - roi.x, roi.width);
-            roi.height = std::min(img_h - roi.y, roi.height);
-
-            if (roi.area() > 0) {
-                cv::Mat appleCrop = maskedImg(roi);
-                arma::rowvec features = AppleUtils::extractFeatures(appleCrop);
+        // Fallback: классифицируем всё изображение
+        fallback_classify:
+        qDebug() << "Detector: Fallback - classifying full image...";
+        
+        {
+            arma::rowvec features = AppleUtils::extractFeatures(cvImg);
+            if (features.n_elem > 0) {
                 int result = m_brain.classify(features);
-
                 const_cast<Detector*>(this)->m_lastFeatures = features;
-
-                // Старый сигнал для совместимости
-                QMetaObject::invokeMethod(const_cast<Detector*>(this), "resultReady",
-                    Qt::QueuedConnection,
-                    Q_ARG(float, (float)roi.x / img_w),
-                    Q_ARG(float, (float)roi.y / img_h),
-                    Q_ARG(float, (float)roi.width / img_w),
-                    Q_ARG(float, (float)roi.height / img_h),
-                    Q_ARG(int, result));
-
-                // Новый сигнал для QML
+                
                 QString quality = (result == 1) ? "Хорошее 🍏" : "Плохое 🍎";
+                qDebug() << "Detector: Fallback result:" << quality;
+                
                 QMetaObject::invokeMethod(const_cast<Detector*>(this), "analysisComplete",
                     Qt::QueuedConnection,
                     Q_ARG(QString, quality),
-                    Q_ARG(float, best.prob));
+                    Q_ARG(float, 0.7f));
                 return;
             }
         }
 
-        // Ничего не нашли
         QMetaObject::invokeMethod(const_cast<Detector*>(this), "analysisError",
             Qt::QueuedConnection,
-            Q_ARG(QString, "Яблоко не обнаружено на изображении"));
+            Q_ARG(QString, "Ошибка анализа изображения"));
     });
 }
 
 void Detector::fixMistake(bool isActuallyGood) {
-    if (m_lastFeatures.n_elem > 0) m_brain.learn(m_lastFeatures, isActuallyGood ? 1 : 0);
+    if (m_lastFeatures.n_elem > 0) {
+        m_brain.learn(m_lastFeatures, isActuallyGood ? 1 : 0);
+        qDebug() << "Detector: Model updated with label" << (isActuallyGood ? 1 : 0);
+    }
 }
 
 void Detector::decode_mask(const ncnn::Mat& mask_proto, int img_w, int img_h, const ncnn::Mat& mask_feat, cv::Mat& mask_out) {

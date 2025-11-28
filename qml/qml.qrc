@@ -4,5 +4,6 @@
         <file>cover/DefaultCoverPage.qml</file>
         <file>pages/AboutPage.qml</file>
         <file>pages/MainPage.qml</file>
+        <file>pages/CameraPage.qml</file>
     </qresource>
 </RCC>

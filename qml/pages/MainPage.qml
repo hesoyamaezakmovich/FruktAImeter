@@ -8,6 +8,9 @@ Page {
     objectName: "mainPage"
     allowedOrientations: Orientation.All
 
+    // Текущий путь к анализируемому изображению
+    property string currentImagePath: ""
+
     // Детектор яблок
     Detector {
         id: detector
@@ -23,6 +26,22 @@ Page {
             confidenceLabel.text = ""
             busyIndicator.running = false
         }
+    }
+    
+    // Функция для анализа тестового изображения с превью
+    function analyzeTestWithPreview(imageType) {
+        busyIndicator.running = true
+        resultLabel.text = ""
+        confidenceLabel.text = ""
+        
+        // Показываем превью из ресурсов
+        if (imageType === 0) {
+            previewImage.source = "qrc:/images/test_apple_good.jpg"
+        } else {
+            previewImage.source = "qrc:/images/test_apple_bad.jpg"
+        }
+        
+        detector.analyzeTestImage(imageType)
     }
 
     // Диалог выбора файла
@@ -60,7 +79,8 @@ Page {
                         busyIndicator.running = true
                         resultLabel.text = ""
                         confidenceLabel.text = ""
-                        detector.analyzeFromPath(model.fileURL)
+                        previewImage.source = model.fileURL
+                        detector.analyzeFromPath(model.filePath)
                         pageStack.pop()
                     }
                 }
@@ -72,6 +92,13 @@ Page {
         anchors.fill: parent
         contentHeight: column.height
 
+        PullDownMenu {
+            MenuItem {
+                text: qsTr("О приложении")
+                onClicked: pageStack.push(Qt.resolvedUrl("AboutPage.qml"))
+            }
+        }
+
         Column {
             id: column
             width: parent.width
@@ -81,24 +108,32 @@ Page {
                 objectName: "pageHeader"
                 title: qsTr("FruktAImeter")
                 description: qsTr("Анализатор качества яблок")
-                extraContent.children: [
-                    IconButton {
-                        objectName: "aboutButton"
-                        icon.source: "image://theme/icon-m-about"
-                        anchors.verticalCenter: parent.verticalCenter
-                        onClicked: pageStack.push(Qt.resolvedUrl("AboutPage.qml"))
-                    }
-                ]
             }
 
             // Превью изображения
-            Image {
-                id: previewImage
-                width: parent.width
+            Rectangle {
+                width: parent.width - 2 * Theme.horizontalPageMargin
                 height: width * 0.75
-                fillMode: Image.PreserveAspectFit
-                source: ""
-                visible: source != ""
+                anchors.horizontalCenter: parent.horizontalCenter
+                color: Theme.rgba(Theme.highlightBackgroundColor, 0.1)
+                radius: Theme.paddingSmall
+                
+                Image {
+                    id: previewImage
+                    anchors.fill: parent
+                    anchors.margins: Theme.paddingSmall
+                    fillMode: Image.PreserveAspectFit
+                    source: ""
+                    
+                    // Placeholder когда нет изображения
+                    Label {
+                        anchors.centerIn: parent
+                        text: "🍎"
+                        font.pixelSize: Theme.fontSizeHuge * 3
+                        visible: previewImage.source == ""
+                        opacity: 0.3
+                    }
+                }
                 
                 BusyIndicator {
                     id: busyIndicator
@@ -108,69 +143,11 @@ Page {
                 }
             }
 
-            // Кнопка камеры
-            Button {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "📷 Сфотографировать яблоко"
-                preferredWidth: Theme.buttonWidthLarge
-                
-                onClicked: {
-                    pageStack.push(Qt.resolvedUrl("CameraPage.qml"), {
-                        detector: detector
-                    })
-                }
-            }
-
-            // Кнопка галереи
-            Button {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "🖼️ Выбрать из галереи"
-                preferredWidth: Theme.buttonWidthLarge
-                
-                onClicked: {
-                    pageStack.push(filePickerDialog)
-                }
-            }
-
-            // Тестовые изображения
-            SectionHeader {
-                text: "Тестирование"
-            }
-
-            Row {
-                anchors.horizontalCenter: parent.horizontalCenter
-                spacing: Theme.paddingMedium
-
-                Button {
-                    text: "🍏 Хорошее"
-                    onClicked: {
-                        busyIndicator.running = true
-                        resultLabel.text = ""
-                        confidenceLabel.text = ""
-                        detector.analyzeTestImage(0)
-                    }
-                }
-
-                Button {
-                    text: "🍎 Плохое"
-                    onClicked: {
-                        busyIndicator.running = true
-                        resultLabel.text = ""
-                        confidenceLabel.text = ""
-                        detector.analyzeTestImage(1)
-                    }
-                }
-            }
-
-            // Результаты анализа
+            // Результаты анализа (перенесены выше для лучшей видимости)
             Column {
                 width: parent.width
-                spacing: Theme.paddingMedium
+                spacing: Theme.paddingSmall
                 visible: resultLabel.text !== ""
-
-                SectionHeader {
-                    text: "Результат анализа"
-                }
 
                 Label {
                     id: resultLabel
@@ -188,36 +165,97 @@ Page {
                     color: Theme.secondaryHighlightColor
                     text: ""
                 }
+            }
 
-                // Кнопки коррекции
-                Row {
-                    anchors.horizontalCenter: parent.horizontalCenter
-                    spacing: Theme.paddingLarge
-                    visible: resultLabel.text !== ""
+            // Кнопки коррекции
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Theme.paddingLarge
+                visible: resultLabel.text !== "" && resultLabel.text.indexOf("Качество:") === 0
 
-                    Button {
-                        text: "✓ Верно"
-                        color: Theme.rgba(Theme.highlightBackgroundColor, 0.2)
-                        onClicked: {
-                            detector.fixMistake(true)
-                            resultLabel.text = "Спасибо за обратную связь!"
-                            confidenceLabel.text = ""
-                        }
+                Button {
+                    text: "✓ Верно"
+                    color: Theme.rgba(Theme.highlightBackgroundColor, 0.2)
+                    onClicked: {
+                        detector.fixMistake(true)
+                        resultLabel.text = "Спасибо за обратную связь!"
+                        confidenceLabel.text = ""
                     }
+                }
 
-                    Button {
-                        text: "✗ Ошибка"
-                        color: Theme.rgba(Theme.errorColor, 0.2)
-                        onClicked: {
-                            detector.fixMistake(false)
-                            resultLabel.text = "Модель обучена, спасибо!"
-                            confidenceLabel.text = ""
-                        }
+                Button {
+                    text: "✗ Ошибка"
+                    color: Theme.rgba(Theme.errorColor, 0.2)
+                    onClicked: {
+                        detector.fixMistake(false)
+                        resultLabel.text = "Модель обучена, спасибо!"
+                        confidenceLabel.text = ""
                     }
                 }
             }
 
+            // Разделитель
+            Item { width: 1; height: Theme.paddingMedium }
+
+            // Кнопка камеры
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "📷 Сфотографировать"
+                preferredWidth: Theme.buttonWidthLarge
+                
+                onClicked: {
+                    pageStack.push(Qt.resolvedUrl("CameraPage.qml"), {
+                        detector: detector
+                    })
+                }
+            }
+
+            // Кнопка галереи
+            Button {
+                anchors.horizontalCenter: parent.horizontalCenter
+                text: "🖼️ Из галереи"
+                preferredWidth: Theme.buttonWidthLarge
+                
+                onClicked: {
+                    pageStack.push(filePickerDialog)
+                }
+            }
+
+            // Тестовые изображения
+            SectionHeader {
+                text: "Тестовые изображения"
+            }
+            
+            Label {
+                anchors {
+                    left: parent.left
+                    right: parent.right
+                    margins: Theme.horizontalPageMargin
+                }
+                wrapMode: Text.WordWrap
+                font.pixelSize: Theme.fontSizeExtraSmall
+                color: Theme.secondaryColor
+                text: "Нажмите для загрузки тестового изображения и анализа:"
+            }
+
+            Row {
+                anchors.horizontalCenter: parent.horizontalCenter
+                spacing: Theme.paddingMedium
+
+                Button {
+                    text: "🍏 Хорошее яблоко"
+                    onClicked: analyzeTestWithPreview(0)
+                }
+
+                Button {
+                    text: "🍎 Плохое яблоко"
+                    onClicked: analyzeTestWithPreview(1)
+                }
+            }
+
             // Инструкция
+            Item { width: 1; height: Theme.paddingLarge }
+            
             Label {
                 anchors {
                     left: parent.left
@@ -227,9 +265,14 @@ Page {
                 wrapMode: Text.WordWrap
                 font.pixelSize: Theme.fontSizeSmall
                 color: Theme.secondaryColor
-                text: qsTr("Сфотографируйте яблоко или выберите изображение из галереи. " +
-                          "Приложение определит качество яблока с помощью нейросети.")
+                text: qsTr("Сфотографируйте яблоко или выберите изображение. " +
+                          "Нейросеть YOLO найдёт яблоко на фото, а KNN-классификатор " +
+                          "определит его качество. Если результат неверный — нажмите " +
+                          "'Ошибка' для дообучения модели.")
             }
+            
+            // Отступ снизу
+            Item { width: 1; height: Theme.paddingLarge }
         }
     }
 }
